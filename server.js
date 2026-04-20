@@ -22,26 +22,37 @@ app.use(express.json());
 
 // MongoDB Connection
 let isConnected = false;
+const mongooseOptions = {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 15000,
+  socketTimeoutMS: 45000,
+  maxPoolSize: 5,
+  minPoolSize: 1,
+  retryWrites: true,
+  w: 'majority',
+};
 
 const connectDB = async () => {
-  if (isConnected) return;
+  if (isConnected && mongoose.connection.readyState === 1) {
+    console.log('✓ Using existing MongoDB connection');
+    return;
+  }
   
   try {
-    await mongoose.connect(process.env.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-      serverSelectionTimeoutMS: 5000,
-    });
+    console.log('Attempting to connect to MongoDB...');
+    await mongoose.connect(process.env.MONGODB_URI, mongooseOptions);
     isConnected = true;
-    console.log('✓ MongoDB connected');
+    console.log('✓ MongoDB connected successfully');
   } catch (err) {
-    console.error('✗ MongoDB connection error:', err);
+    console.error('✗ MongoDB connection error:', err.message);
+    isConnected = false;
     throw err;
   }
 };
 
 // Connect to DB on startup
-connectDB().catch(err => console.error('Initial connection error:', err));
+connectDB().catch(err => console.error('Initial connection error:', err.message));
 
 // Note Schema
 const noteSchema = new mongoose.Schema({
@@ -69,14 +80,23 @@ const Note = mongoose.model('Note', noteSchema);
 
 // Middleware to ensure DB connection
 const ensureDBConnection = async (req, res, next) => {
-  if (!isConnected) {
-    try {
+  try {
+    const readyState = mongoose.connection.readyState;
+    
+    // 0 = disconnected, 1 = connected, 2 = connecting, 3 = disconnecting
+    if (readyState !== 1) {
+      console.log(`Connection state: ${readyState}, attempting to reconnect...`);
+      isConnected = false;
       await connectDB();
-    } catch (error) {
-      return res.status(500).json({ message: 'Database connection failed', error: error.message });
     }
+    next();
+  } catch (error) {
+    console.error('Database connection check failed:', error.message);
+    return res.status(503).json({ 
+      message: 'Database unavailable. Please ensure: 1) MongoDB URI is correct 2) IP 0.0.0.0/0 is whitelisted in MongoDB Atlas', 
+      error: error.message 
+    });
   }
-  next();
 };
 
 app.use(ensureDBConnection);
@@ -87,11 +107,14 @@ app.get('/api/notes', async (req, res) => {
     const search = req.query.search || '';
     const notes = await Note.find({
       title: { $regex: search, $options: 'i' }
-    }).sort({ createdDate: -1 });
+    }).sort({ createdDate: -1 }).maxTimeMS(30000);
     res.json(notes);
   } catch (error) {
-    console.error('Error fetching notes:', error);
-    res.status(500).json({ message: 'Error fetching notes', error: error.message });
+    console.error('Error fetching notes:', error.message);
+    res.status(500).json({ 
+      message: 'Error fetching notes', 
+      error: error.message 
+    });
   }
 });
 
@@ -123,18 +146,21 @@ app.post('/api/notes', async (req, res) => {
       description: description.trim(),
     });
 
-    const newNote = await note.save();
+    const newNote = await note.save({ maxTimeMS: 30000 });
     res.status(201).json(newNote);
   } catch (error) {
-    console.error('Error creating note:', error);
-    res.status(400).json({ message: 'Error creating note', error: error.message });
+    console.error('Error creating note:', error.message);
+    res.status(400).json({ 
+      message: 'Error creating note', 
+      error: error.message 
+    });
   }
 });
 
 // PUT update a note
 app.put('/api/notes/:id', async (req, res) => {
   try {
-    const note = await Note.findById(req.params.id);
+    const note = await Note.findById(req.params.id, {}, { maxTimeMS: 30000 });
     if (!note) {
       return res.status(404).json({ message: 'Note not found' });
     }
@@ -143,31 +169,48 @@ app.put('/api/notes/:id', async (req, res) => {
     if (req.body.description) note.description = req.body.description;
     note.updatedDate = Date.now();
 
-    const updatedNote = await note.save();
+    const updatedNote = await note.save({ maxTimeMS: 30000 });
     res.json(updatedNote);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    console.error('Error updating note:', error.message);
+    res.status(400).json({ 
+      message: 'Error updating note', 
+      error: error.message 
+    });
   }
 });
 
 // DELETE a note
 app.delete('/api/notes/:id', async (req, res) => {
   try {
-    const note = await Note.findByIdAndDelete(req.params.id);
+    const note = await Note.findByIdAndDelete(req.params.id, { maxTimeMS: 30000 });
     if (!note) {
       return res.status(404).json({ message: 'Note not found' });
     }
     res.json({ message: 'Note deleted' });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Error deleting note:', error.message);
+    res.status(500).json({ 
+      message: 'Error deleting note', 
+      error: error.message 
+    });
   }
 });
 
 // Health check
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'Backend is running' });
+  res.json({ 
+    status: 'Backend is running',
+    mongodb: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected'
+  });
 });
 
-app.listen(PORT, () => {
-  console.log(`✓ Server running on http://localhost:${PORT}`);
-});
+// Only listen in development (local)
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(PORT, () => {
+    console.log(`✓ Server running on http://localhost:${PORT}`);
+  });
+}
+
+// Export for Vercel serverless
+module.exports = app;
