@@ -7,16 +7,41 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Middleware
-app.use(cors());
+const corsOptions = {
+  origin: [
+    'https://mini-notes-app-frontend.vercel.app',
+    'https://mini-notes-app-frontend-7ni499ced-sandeep0748s-projects.vercel.app',
+    'http://localhost:3000'
+  ],
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  credentials: true
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 
 // MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('✓ MongoDB connected'))
-.catch(err => console.error('✗ MongoDB connection error:', err));
+let isConnected = false;
+
+const connectDB = async () => {
+  if (isConnected) return;
+  
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 5000,
+    });
+    isConnected = true;
+    console.log('✓ MongoDB connected');
+  } catch (err) {
+    console.error('✗ MongoDB connection error:', err);
+    throw err;
+  }
+};
+
+// Connect to DB on startup
+connectDB().catch(err => console.error('Initial connection error:', err));
 
 // Note Schema
 const noteSchema = new mongoose.Schema({
@@ -42,6 +67,20 @@ const Note = mongoose.model('Note', noteSchema);
 
 // Routes
 
+// Middleware to ensure DB connection
+const ensureDBConnection = async (req, res, next) => {
+  if (!isConnected) {
+    try {
+      await connectDB();
+    } catch (error) {
+      return res.status(500).json({ message: 'Database connection failed', error: error.message });
+    }
+  }
+  next();
+};
+
+app.use(ensureDBConnection);
+
 // GET all notes
 app.get('/api/notes', async (req, res) => {
   try {
@@ -51,7 +90,8 @@ app.get('/api/notes', async (req, res) => {
     }).sort({ createdDate: -1 });
     res.json(notes);
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    console.error('Error fetching notes:', error);
+    res.status(500).json({ message: 'Error fetching notes', error: error.message });
   }
 });
 
@@ -70,16 +110,24 @@ app.get('/api/notes/:id', async (req, res) => {
 
 // POST create a new note
 app.post('/api/notes', async (req, res) => {
-  const note = new Note({
-    title: req.body.title,
-    description: req.body.description,
-  });
-
   try {
+    const { title, description } = req.body;
+    
+    // Validate input
+    if (!title || !description) {
+      return res.status(400).json({ message: 'Title and description are required' });
+    }
+
+    const note = new Note({
+      title: title.trim(),
+      description: description.trim(),
+    });
+
     const newNote = await note.save();
     res.status(201).json(newNote);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    console.error('Error creating note:', error);
+    res.status(400).json({ message: 'Error creating note', error: error.message });
   }
 });
 
